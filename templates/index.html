@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Garmin Heart Rate</title>
+  <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --bg: #0b0f15;
+      --panel: #121826;
+      --accent: #ff5b5b;
+      --text: #e8eef5;
+      --muted: #8ca0b3;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(circle at 20% 20%, #112031, #0b0f15 45%),
+                  radial-gradient(circle at 80% 10%, #151e2f, #0b0f15 50%);
+      color: var(--text);
+      font-family: "Space Grotesk", "Segoe UI", system-ui, -apple-system, sans-serif;
+    }
+    .page {
+      position: relative;
+      padding: 20px;
+      display: flex;
+      justify-content: flex-end;
+      align-items: flex-start;
+    }
+    .card {
+      width: 360px;
+      height: 220px;
+      background: var(--panel);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 14px;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.35);
+      padding: 16px;
+      position: sticky;
+      top: 20px;
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .title {
+      font-weight: 600;
+      letter-spacing: 0.3px;
+    }
+    .current {
+      display: flex;
+      align-items: baseline;
+      gap: 4px;
+      font-weight: 700;
+      color: var(--accent);
+      font-size: 1.1rem;
+    }
+    canvas {
+      width: 100% !important;
+      height: 150px !important;
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="card">
+      <div class="card-header">
+        <div class="title">Live Heart Rate</div>
+        <div class="current"><span id="hrValue">--</span><span style="color:var(--muted);font-size:0.9rem;">bpm</span></div>
+      </div>
+      <canvas id="hrChart"></canvas>
+    </div>
+  </div>
+
+  <script>
+    const socket = io();
+    const hrValue = document.getElementById("hrValue");
+    const ctx = document.getElementById("hrChart").getContext("2d");
+
+    const chart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels: [],
+        datasets: [{
+          label: "Heart Rate",
+          data: [],
+          borderColor: "rgba(255, 91, 91, 0.9)",
+          backgroundColor: "rgba(255, 91, 91, 0.12)",
+          borderWidth: 2,
+          tension: 0.35,
+          pointRadius: 0
+        }]
+      },
+      options: {
+        animation: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { display: false },
+          y: {
+            ticks: { color: "var(--text)" },
+            grid: { color: "rgba(255,255,255,0.05)" }
+          }
+        }
+      }
+    });
+
+    socket.on("hr", (data) => {
+      const hr = data.hr;
+      hrValue.textContent = hr;
+
+      chart.data.labels.push("");
+      chart.data.datasets[0].data.push(hr);
+
+      if (chart.data.labels.length > 60) {
+        chart.data.labels.shift();
+        chart.data.datasets[0].data.shift();
+      }
+
+      chart.update();
+    });
+  </script>
+</body>
+</html>

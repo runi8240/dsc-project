@@ -51,6 +51,18 @@
       position: static;
       min-height: 260px;
     }
+    .track-info {
+      margin-bottom: 12px;
+    }
+    .track-info h3 {
+      margin: 0;
+      font-size: 1rem;
+    }
+    .track-info p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
     .card-header {
       display: flex;
       justify-content: space-between;
@@ -120,6 +132,10 @@
         <div class="card-header">
           <div class="title">Spotify Player</div>
         </div>
+        <div class="track-info">
+          <h3 id="trackTitle">Waiting for recommendation…</h3>
+          <p id="trackMeta"></p>
+        </div>
         <div class="spotify-control">
           <input id="trackIdInput" type="text" placeholder="Enter Spotify track ID">
           <button id="loadTrack">Play</button>
@@ -187,6 +203,8 @@
     const trackIdInput = document.getElementById("trackIdInput");
     const loadTrack = document.getElementById("loadTrack");
     const spotifyPlayer = document.getElementById("spotifyPlayer");
+    const trackTitle = document.getElementById("trackTitle");
+    const trackMeta = document.getElementById("trackMeta");
 
     function extractTrackId(input) {
       const trimmed = input.trim();
@@ -220,6 +238,19 @@
       if (event.key === "Enter") {
         updateSpotifyPlayer(trackIdInput.value);
       }
+    });
+
+    socket.on("track", (data) => {
+      if (data.track_id) {
+        trackIdInput.value = data.track_id;
+        updateSpotifyPlayer(data.track_id);
+      }
+      if (data.track_name) {
+        trackTitle.textContent = data.track_name;
+      }
+      const artistText = data.artists ? `by ${data.artists}` : "";
+      const energyText = data.energy ? ` · energy ${Number(data.energy).toFixed(2)}` : "";
+      trackMeta.textContent = `${artistText}${energyText}`.trim();
     });
   </script>
 </body>

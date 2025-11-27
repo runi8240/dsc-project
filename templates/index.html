@@ -27,12 +27,18 @@
       position: relative;
       padding: 20px;
       display: flex;
-      justify-content: flex-end;
+      justify-content: center;
       align-items: flex-start;
+    }
+    .cards {
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
+      justify-content: center;
     }
     .card {
       width: 360px;
-      height: 220px;
+      min-height: 220px;
       background: var(--panel);
       border: 1px solid rgba(255, 255, 255, 0.05);
       border-radius: 14px;
@@ -40,6 +46,10 @@
       padding: 16px;
       position: sticky;
       top: 20px;
+    }
+    .spotify-card {
+      position: static;
+      min-height: 260px;
     }
     .card-header {
       display: flex;
@@ -63,16 +73,65 @@
       width: 100% !important;
       height: 150px !important;
     }
+    .spotify-control {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .spotify-control input {
+      flex: 1;
+      padding: 6px 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.04);
+      color: var(--text);
+      font-size: 0.9rem;
+    }
+    .spotify-control button {
+      padding: 6px 14px;
+      border: none;
+      border-radius: 8px;
+      background: var(--accent);
+      color: var(--panel);
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .spotify-control button:hover {
+      opacity: 0.9;
+    }
+    iframe {
+      border: none;
+      width: 100%;
+      border-radius: 10px;
+    }
   </style>
 </head>
 <body>
   <div class="page">
-    <div class="card">
-      <div class="card-header">
-        <div class="title">Live Heart Rate</div>
-        <div class="current"><span id="hrValue">--</span><span style="color:var(--muted);font-size:0.9rem;">bpm</span></div>
+    <div class="cards">
+      <div class="card">
+        <div class="card-header">
+          <div class="title">Live Heart Rate</div>
+          <div class="current"><span id="hrValue">--</span><span style="color:var(--muted);font-size:0.9rem;">bpm</span></div>
+        </div>
+        <canvas id="hrChart"></canvas>
       </div>
-      <canvas id="hrChart"></canvas>
+      <div class="card spotify-card">
+        <div class="card-header">
+          <div class="title">Spotify Player</div>
+        </div>
+        <div class="spotify-control">
+          <input id="trackIdInput" type="text" placeholder="Enter Spotify track ID">
+          <button id="loadTrack">Play</button>
+        </div>
+        <iframe
+          id="spotifyPlayer"
+          src="https://open.spotify.com/embed/track/3xkxcbnc7G3XYuZt6eUnI5?utm_source=generator"
+          height="180"
+          allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
+          loading="lazy"
+        ></iframe>
+      </div>
     </div>
   </div>
 
@@ -123,6 +182,44 @@
       }
 
       chart.update();
+    });
+
+    const trackIdInput = document.getElementById("trackIdInput");
+    const loadTrack = document.getElementById("loadTrack");
+    const spotifyPlayer = document.getElementById("spotifyPlayer");
+
+    function extractTrackId(input) {
+      const trimmed = input.trim();
+      if (!trimmed) {
+        return null;
+      }
+
+      const uriMatch = trimmed.match(/^spotify:track:([A-Za-z0-9]+)$/i);
+      if (uriMatch) {
+        return uriMatch[1];
+      }
+
+      const urlMatch = trimmed.match(/track\/([A-Za-z0-9]+)(?:\?|$)/i);
+      if (urlMatch) {
+        return urlMatch[1];
+      }
+
+      return trimmed;
+    }
+
+    function updateSpotifyPlayer(rawInput) {
+      const trackId = extractTrackId(rawInput);
+      if (!trackId) {
+        return;
+      }
+      spotifyPlayer.src = `https://open.spotify.com/embed/track/${trackId}?utm_source=generator`;
+    }
+
+    loadTrack.addEventListener("click", () => updateSpotifyPlayer(trackIdInput.value));
+    trackIdInput.addEventListener("keyup", (event) => {
+      if (event.key === "Enter") {
+        updateSpotifyPlayer(trackIdInput.value);
+      }
     });
   </script>
 </body>

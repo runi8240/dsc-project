@@ -3,6 +3,11 @@ import time
 from pathlib import Path
 from typing import Dict, Optional
 
+import base64
+import os
+from typing import Tuple
+
+import requests
 from flask import Flask, jsonify, render_template, request
 from flask_socketio import SocketIO
 
@@ -21,6 +26,39 @@ latest_hr: Optional[int] = None
 latest_track: Optional[Dict[str, str]] = None
 last_track_change: Optional[float] = None
 MIN_TRACK_DURATION = 30  # seconds a recommended track should play before switching
+
+# Secrets are loaded from environment or a local text file (not committed).
+# File format (lines): SPOTIFY_CLIENT_ID=..., SPOTIFY_CLIENT_SECRET=..., SPOTIFY_REFRESH_TOKEN=...
+SPOTIFY_CREDENTIALS_FILE = os.getenv("SPOTIFY_CREDENTIALS_FILE", "spotify_credentials.txt")
+
+
+def _load_from_file() -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    try:
+        with open(SPOTIFY_CREDENTIALS_FILE, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return None, None, None
+
+    values = {}
+    for line in lines:
+        if "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        values[key.strip()] = val.strip()
+
+    return (
+        values.get("SPOTIFY_CLIENT_ID"),
+        values.get("SPOTIFY_CLIENT_SECRET"),
+        values.get("SPOTIFY_REFRESH_TOKEN"),
+    )
+
+
+file_client_id, file_client_secret, file_refresh_token = _load_from_file()
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", file_client_id)
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", file_client_secret)
+SPOTIFY_REFRESH_TOKEN = os.getenv("SPOTIFY_REFRESH_TOKEN", file_refresh_token)
+SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
+SPOTIFY_SCOPES = "user-read-email user-read-private streaming user-modify-playback-state user-read-playback-state"
 
 
 def append_telemetry_row(timestamp: float, hr: int) -> None:
@@ -125,6 +163,40 @@ def feedback():
     event = feedback_logger.log(event_type=event_type, track_id=track_id, metadata=metadata)
     socketio.emit("feedback", {"event_type": event_type, "track_id": track_id})
     return jsonify({"status": "ok", "event": event.__dict__})
+
+
+def _spotify_auth_header() -> Dict[str, str]:
+    if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+        return {}
+    creds = f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode("utf-8")
+    return {"Authorization": f"Basic {base64.b64encode(creds).decode('ascii')}"}
+
+
+@app.route("/spotify/token", methods=["GET"])
+def spotify_token():
+    """Mint an access token from refresh token so frontend never sees the secret."""
+    if not SPOTIFY_REFRESH_TOKEN:
+        return jsonify({"error": "SPOTIFY_REFRESH_TOKEN not set"}), 400
+    headers = _spotify_auth_header()
+    if not headers:
+        return jsonify({"error": "SPOTIFY_CLIENT_ID/SECRET not set"}), 400
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": SPOTIFY_REFRESH_TOKEN,
+        "scope": SPOTIFY_SCOPES,
+    }
+    resp = requests.post(SPOTIFY_TOKEN_URL, data=data, headers=headers, timeout=10)
+    if not resp.ok:
+        return jsonify({"error": "Failed to refresh token", "details": resp.text}), 502
+    token_payload = resp.json()
+    return jsonify(
+        {
+            "access_token": token_payload.get("access_token"),
+            "expires_in": token_payload.get("expires_in"),
+            "token_type": token_payload.get("token_type"),
+            "scope": token_payload.get("scope"),
+        }
+    )
 
 
 @socketio.on("connect")

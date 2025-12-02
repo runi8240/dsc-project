@@ -1,12 +1,13 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Live Garmin Heart Rate</title>
-  <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <style>
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Garmin Heart Rate</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://sdk.scdn.co/spotify-player.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
     :root {
       --bg: #0b0f15;
       --panel: #121826;
@@ -50,6 +51,25 @@
     .spotify-card {
       position: static;
       min-height: 260px;
+    }
+    .spotify-connect {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 10px;
+      align-items: center;
+    }
+    .spotify-connect button {
+      padding: 8px 10px;
+      border: none;
+      border-radius: 10px;
+      background: var(--accent);
+      color: var(--panel);
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .spotify-connect .status {
+      color: var(--muted);
+      font-size: 0.9rem;
     }
     .track-info {
       margin-bottom: 12px;
@@ -155,6 +175,10 @@
         <div class="card-header">
           <div class="title">Spotify Player</div>
         </div>
+        <div class="spotify-connect">
+          <button id="connectSpotify">Connect to Spotify</button>
+          <div class="status" id="spotifyStatus">Not connected</div>
+        </div>
         <div class="track-info">
           <h3 id="trackTitle">Waiting for recommendation…</h3>
           <p id="trackMeta"></p>
@@ -234,11 +258,113 @@
     const spotifyPlayer = document.getElementById("spotifyPlayer");
     const trackTitle = document.getElementById("trackTitle");
     const trackMeta = document.getElementById("trackMeta");
+    const spotifyStatus = document.getElementById("spotifyStatus");
+    const connectSpotify = document.getElementById("connectSpotify");
     const feedbackStatus = document.getElementById("feedbackStatus");
     const btnLike = document.getElementById("btnLike");
     const btnSkip = document.getElementById("btnSkip");
     const btnContinue = document.getElementById("btnContinue");
     const FEEDBACK_URL = "/feedback";
+    const TOKEN_URL = "/spotify/token";
+
+    let spotifyDeviceId = null;
+    let spotifyPlayerSdk = null;
+    let currentTrackUri = null;
+    let spotifyAccessToken = null;
+    let spotifyReady = false;
+
+    async function fetchSpotifyToken() {
+      const res = await fetch(TOKEN_URL);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "Failed to get Spotify token");
+      }
+      const data = await res.json();
+      spotifyAccessToken = data.access_token;
+      return spotifyAccessToken;
+    }
+
+    async function ensureSpotifyPlayer() {
+      if (spotifyPlayerSdk) {
+        return spotifyPlayerSdk;
+      }
+      const token = await fetchSpotifyToken();
+      spotifyPlayerSdk = new Spotify.Player({
+        name: "DSC Autoplayer",
+        getOAuthToken: (cb) => cb(spotifyAccessToken || token),
+      });
+
+      spotifyPlayerSdk.addListener("ready", ({ device_id }) => {
+        spotifyDeviceId = device_id;
+        spotifyStatus.textContent = "Connected";
+        spotifyReady = true;
+      });
+
+      spotifyPlayerSdk.addListener("not_ready", () => {
+        spotifyStatus.textContent = "Player not ready";
+      });
+
+      spotifyPlayerSdk.addListener("initialization_error", ({ message }) => {
+        spotifyStatus.textContent = `Init error: ${message}`;
+      });
+      spotifyPlayerSdk.addListener("authentication_error", ({ message }) => {
+        spotifyStatus.textContent = `Auth error: ${message}`;
+      });
+      spotifyPlayerSdk.addListener("account_error", ({ message }) => {
+        spotifyStatus.textContent = `Account error: ${message}`;
+      });
+
+      await spotifyPlayerSdk.connect();
+      return spotifyPlayerSdk;
+    }
+
+    async function transferPlayback() {
+      if (!spotifyDeviceId) return;
+      const token = spotifyAccessToken || (await fetchSpotifyToken());
+      await fetch("https://api.spotify.com/v1/me/player", {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ device_ids: [spotifyDeviceId], play: true }),
+      });
+    }
+
+    async function playTrack(uri) {
+      if (!uri) return;
+      await ensureSpotifyPlayer();
+      if (!spotifyReady || !spotifyDeviceId) {
+        spotifyStatus.textContent = "Connect to Spotify first";
+        return;
+      }
+      await transferPlayback();
+      const token = spotifyAccessToken || (await fetchSpotifyToken());
+      await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${spotifyDeviceId}`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ uris: [uri] }),
+      });
+    }
+
+    connectSpotify.addEventListener("click", async () => {
+      spotifyStatus.textContent = "Connecting…";
+      try {
+        await ensureSpotifyPlayer();
+        if (spotifyPlayerSdk && spotifyPlayerSdk.activateElement) {
+          await spotifyPlayerSdk.activateElement();
+        }
+        await transferPlayback();
+        if (currentTrackUri) {
+          await playTrack(currentTrackUri);
+        }
+      } catch (err) {
+        spotifyStatus.textContent = err.message;
+      }
+    });
 
     function extractTrackId(input) {
       const trimmed = input.trim();
@@ -278,6 +404,9 @@
       if (data.track_id) {
         trackIdInput.value = data.track_id;
         updateSpotifyPlayer(data.track_id);
+        currentTrackUri = `spotify:track:${data.track_id}`;
+        // Auto-play via Web Playback SDK if connected
+        playTrack(currentTrackUri).catch(() => {});
       }
       if (data.track_name) {
         trackTitle.textContent = data.track_name;

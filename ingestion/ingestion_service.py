@@ -7,6 +7,7 @@ from typing import Dict, Optional
 
 import requests
 from bleak import BleakClient
+import redis
 
 # BLE constants
 HR_CHAR = "00002a37-0000-1000-8000-00805f9b34fb"
@@ -18,6 +19,9 @@ GARMIN_ID = os.getenv(
 # Backend endpoint
 BACKEND_TELEMETRY_URL = os.getenv("BACKEND_TELEMETRY_URL", "http://localhost:5001/telemetry")
 POST_TIMEOUT = 4
+REDIS_URL = os.getenv("REDIS_URL")
+REDIS_STREAM_KEY = os.getenv("REDIS_STREAM_KEY", "telemetry")
+redis_client: Optional[redis.Redis] = redis.Redis.from_url(REDIS_URL) if REDIS_URL else None
 
 # Simple queue for telemetry so BLE handler stays fast
 telemetry_queue: deque[Dict[str, float]] = deque()
@@ -37,7 +41,10 @@ def telemetry_worker() -> None:
             continue
 
         try:
-            requests.post(BACKEND_TELEMETRY_URL, json=payload, timeout=POST_TIMEOUT)
+            if redis_client:
+                redis_client.xadd(REDIS_STREAM_KEY, {"hr": payload["hr"], "timestamp": payload["timestamp"]})
+            else:
+                requests.post(BACKEND_TELEMETRY_URL, json=payload, timeout=POST_TIMEOUT)
         except Exception as exc:
             # Keep BLE loop running even if backend is temporarily unavailable
             print(f"Failed to POST telemetry: {exc}")

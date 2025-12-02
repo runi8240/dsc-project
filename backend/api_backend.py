@@ -7,6 +7,7 @@ import json
 import base64
 import os
 from typing import Tuple
+from functools import partial
 
 import requests
 from flask import Flask, jsonify, render_template, request
@@ -15,6 +16,7 @@ from flask_socketio import SocketIO
 from services.feedback_service import FeedbackLogger
 from services.recommender_service import RecommenderService
 from db import get_conn, init_db
+from redis_consumer import RedisStreamConsumer
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
@@ -31,6 +33,8 @@ telemetry_path = DATA_DIR / "telemetry.csv"  # legacy, no longer used
 recommendations_path = DATA_DIR / "recommendations.csv"  # legacy, no longer used
 recommender = RecommenderService(data_path=DATA_DIR / "data.csv")
 feedback_logger = FeedbackLogger(output_path=DATA_DIR / "feedback.jsonl")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_STREAM_KEY = os.getenv("REDIS_STREAM_KEY", "telemetry")
 
 latest_hr: Optional[int] = None
 latest_track: Optional[Dict[str, str]] = None
@@ -99,19 +103,19 @@ def append_recommendation_row(timestamp: float, track: Dict[str, str], hr: Optio
         conn.commit()
 
 
-def maybe_emit_recommendation() -> Optional[Dict[str, str]]:
+def maybe_emit_recommendation(force_switch: bool = False) -> Optional[Dict[str, str]]:
     global latest_track, last_track_change
     track = recommender.recommend()
     if not track:
         return None
 
     now = time.time()
-    should_switch = False
+    should_switch = force_switch
 
     if latest_track is None:
         should_switch = True
     elif track["track_id"] != latest_track.get("track_id"):
-        if last_track_change is None or now - last_track_change >= MIN_TRACK_DURATION:
+        if force_switch or last_track_change is None or now - last_track_change >= MIN_TRACK_DURATION:
             should_switch = True
 
     if should_switch:
@@ -123,6 +127,30 @@ def maybe_emit_recommendation() -> Optional[Dict[str, str]]:
     return track
 
 
+def handle_telemetry(hr: int, timestamp: float):
+    global latest_hr
+    latest_hr = hr
+    recommender.observe_hr(hr)
+    append_telemetry_row(timestamp, hr)
+    socketio.emit("hr", {"hr": hr})
+    maybe_emit_recommendation()
+
+
+def _redis_handler(data: Dict):
+    # Redis returns bytes; decode fields
+    try:
+        hr_bytes = data.get(b"hr")
+        ts_bytes = data.get(b"timestamp")
+        if hr_bytes is None:
+            return
+        hr = int(hr_bytes)
+        ts = float(ts_bytes) if ts_bytes is not None else time.time()
+        handle_telemetry(hr, ts)
+        print(f"[redis] consumed telemetry hr={hr} ts={ts}")
+    except Exception as exc:
+        print(f"Error handling redis message: {exc}")
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -130,7 +158,6 @@ def index():
 
 @app.route("/telemetry", methods=["POST"])
 def telemetry():
-    global latest_hr
     payload = request.get_json(silent=True) or {}
     hr_raw = payload.get("hr")
     if hr_raw is None:
@@ -142,14 +169,8 @@ def telemetry():
         return jsonify({"error": "hr must be an integer"}), 400
 
     timestamp = float(payload.get("timestamp") or time.time())
-
-    latest_hr = hr
-    recommender.observe_hr(hr)
-    append_telemetry_row(timestamp, hr)
-    socketio.emit("hr", {"hr": hr})
-
-    track = maybe_emit_recommendation()
-    return jsonify({"status": "ok", "hr": hr, "track": track}), 200
+    handle_telemetry(hr, timestamp)
+    return jsonify({"status": "ok", "hr": hr}), 200
 
 
 @app.route("/recommendation", methods=["GET"])
@@ -176,7 +197,10 @@ def feedback():
         )
         conn.commit()
     socketio.emit("feedback", {"event_type": event_type, "track_id": track_id})
-    return jsonify({"status": "ok", "event": event.__dict__})
+    new_track = None
+    if event_type == "dislike":
+        new_track = maybe_emit_recommendation(force_switch=True)
+    return jsonify({"status": "ok", "event": event.__dict__, "track": new_track})
 
 
 def _spotify_auth_header() -> Dict[str, str]:
@@ -222,4 +246,11 @@ def send_last_value():
 
 
 if __name__ == "__main__":
+    redis_consumer = RedisStreamConsumer(
+        redis_url=REDIS_URL,
+        stream_key=REDIS_STREAM_KEY,
+        group="backend",
+        handler=_redis_handler,
+    )
+    redis_consumer.start()
     socketio.run(app, host="0.0.0.0", port=5001, allow_unsafe_werkzeug=True)

@@ -10,7 +10,16 @@ services:
       - "5001:5001"
     environment:
       - SPOTIFY_CREDENTIALS_FILE=/app/config/spotify_credentials.txt
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_STREAM_KEY=telemetry
     volumes:
       - ./data:/app/data
       - ./config:/app/config
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: dsc-redis
+    ports:
+      - "6379:6379"
     restart: unless-stopped

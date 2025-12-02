@@ -189,8 +189,8 @@
         </div>
         <div class="feedback-buttons">
           <button class="like" id="btnLike">Like</button>
-          <button class="skip" id="btnSkip">Skip</button>
-          <button class="continue" id="btnContinue">Continue</button>
+          <button class="skip" id="btnSkip">Dislike</button>
+          <button class="continue" id="btnContinue">Neutral</button>
         </div>
         <div class="feedback-status" id="feedbackStatus"></div>
         <iframe
@@ -429,15 +429,22 @@
           const err = await res.json().catch(() => ({}));
           throw new Error(err.error || "Failed to send feedback");
         }
+        const body = await res.json();
         feedbackStatus.textContent = `Sent: ${eventType}`;
+        if (body.track && body.track.track_id) {
+          trackIdInput.value = body.track.track_id;
+          updateSpotifyPlayer(body.track.track_id);
+          currentTrackUri = `spotify:track:${body.track.track_id}`;
+          playTrack(currentTrackUri).catch(() => {});
+        }
       } catch (err) {
         feedbackStatus.textContent = err.message;
       }
     }
 
     btnLike.addEventListener("click", () => sendFeedback("like"));
-    btnSkip.addEventListener("click", () => sendFeedback("skip"));
-    btnContinue.addEventListener("click", () => sendFeedback("continue"));
+    btnSkip.addEventListener("click", () => sendFeedback("dislike"));
+    btnContinue.addEventListener("click", () => sendFeedback("neutral"));
   </script>
 </body>
 </html>

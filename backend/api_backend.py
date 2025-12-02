@@ -10,8 +10,9 @@ from typing import Tuple
 from functools import partial
 
 import requests
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, redirect, url_for, session
 from flask_socketio import SocketIO
+from werkzeug.security import generate_password_hash, check_password_hash
 
 from services.feedback_service import FeedbackLogger
 from services.recommender_service import RecommenderService
@@ -26,6 +27,7 @@ CONFIG_DIR.mkdir(exist_ok=True)
 
 app = Flask(__name__, template_folder="templates")
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+app.secret_key = os.getenv("SECRET_KEY", "dev-secret-change-me")
 
 DB_PATH = DATA_DIR / "app.db"
 init_db(DB_PATH)
@@ -35,6 +37,10 @@ recommender = RecommenderService(data_path=DATA_DIR / "data.csv")
 feedback_logger = FeedbackLogger(output_path=DATA_DIR / "feedback.jsonl")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 REDIS_STREAM_KEY = os.getenv("REDIS_STREAM_KEY", "telemetry")
+AUTH_USERNAME = os.getenv("AUTH_USERNAME")
+AUTH_PASSWORD = os.getenv("AUTH_PASSWORD")
+AUTH_USER_ID = os.getenv("AUTH_USER_ID", "demo-user")
+AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() == "true"
 
 latest_hr: Optional[int] = None
 latest_track: Optional[Dict[str, str]] = None
@@ -153,6 +159,8 @@ def _redis_handler(data: Dict):
 
 @app.route("/")
 def index():
+    if AUTH_ENABLED and not session.get("user_id"):
+        return redirect(url_for("login"))
     return render_template("index.html")
 
 
@@ -189,6 +197,8 @@ def feedback():
         return jsonify({"error": "event_type is required"}), 400
     track_id = payload.get("track_id")
     metadata = payload.get("metadata") or {}
+    if AUTH_ENABLED and session.get("user_id"):
+        metadata = {**metadata, "user_id": session["user_id"]}
     event = feedback_logger.log(event_type=event_type, track_id=track_id, metadata=metadata)
     with get_conn(DB_PATH) as conn:
         conn.execute(
@@ -237,8 +247,110 @@ def spotify_token():
     )
 
 
+@app.route("/auth/login", methods=["POST"])
+def auth_login():
+    if not AUTH_ENABLED:
+        return jsonify({"error": "auth disabled"}), 400
+    payload = request.get_json(silent=True) or {}
+    username = payload.get("username")
+    password = payload.get("password")
+    user = _verify_credentials(username, password)
+    if not user:
+        return jsonify({"error": "invalid credentials"}), 401
+    session["user_id"] = user["id"]
+    session["username"] = user["username"]
+    return jsonify({"status": "ok", "user_id": user["id"], "username": user["username"]})
+
+
+@app.route("/auth/signup", methods=["POST"])
+def auth_signup():
+    if not AUTH_ENABLED:
+        return jsonify({"error": "auth disabled"}), 400
+    payload = request.get_json(silent=True) or {}
+    username = payload.get("username")
+    password = payload.get("password")
+    if not username or not password:
+        return jsonify({"error": "username and password required"}), 400
+    user_id = _create_user(username, password)
+    if not user_id:
+        return jsonify({"error": "username already exists"}), 409
+    session["user_id"] = user_id
+    session["username"] = username
+    return jsonify({"status": "ok", "user_id": user_id, "username": username})
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not AUTH_ENABLED:
+        return redirect(url_for("index"))
+    if request.method == "POST":
+        username = request.form.get("username")
+        password = request.form.get("password")
+        user = _verify_credentials(username, password)
+        if user:
+            session["user_id"] = user["id"]
+            session["username"] = user["username"]
+            return redirect(url_for("index"))
+        return render_template("login.html", error="Invalid credentials")
+    return render_template("login.html", error=None)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login" if AUTH_ENABLED else "index"))
+
+
+@app.route("/signup", methods=["GET", "POST"])
+def signup():
+    if not AUTH_ENABLED:
+        return redirect(url_for("index"))
+    if request.method == "POST":
+        username = request.form.get("username")
+        password = request.form.get("password")
+        if not username or not password:
+            return render_template("signup.html", error="Username and password required")
+        user_id = _create_user(username, password)
+        if not user_id:
+            return render_template("signup.html", error="Username already exists")
+        session["user_id"] = user_id
+        session["username"] = username
+        return redirect(url_for("index"))
+    return render_template("signup.html", error=None)
+
+
+def _verify_credentials(username: str, password: str):
+    # Env-based user (optional)
+    if AUTH_USERNAME and AUTH_PASSWORD and username == AUTH_USERNAME and password == AUTH_PASSWORD:
+        return {"id": AUTH_USER_ID, "username": AUTH_USERNAME}
+    # DB user lookup
+    with get_conn(DB_PATH) as conn:
+        row = conn.execute("SELECT id, username, password_hash FROM users WHERE username = ?", (username,)).fetchone()
+    if not row:
+        return None
+    if check_password_hash(row["password_hash"], password):
+        return {"id": row["id"], "username": row["username"]}
+    return None
+
+
+def _create_user(username: str, password: str):
+    pwd_hash = generate_password_hash(password)
+    with get_conn(DB_PATH) as conn:
+        try:
+            cur = conn.execute(
+                "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                (username, pwd_hash),
+            )
+            conn.commit()
+            return cur.lastrowid
+        except Exception:
+            return None
+
+
 @socketio.on("connect")
 def send_last_value():
+    if AUTH_ENABLED and not session.get("user_id"):
+        return False
     if latest_hr is not None:
         socketio.emit("hr", {"hr": latest_hr})
     if latest_track is not None:

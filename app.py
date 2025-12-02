@@ -14,11 +14,12 @@ from flask_socketio import SocketIO
 # BLE constants
 HR_CHAR = "00002a37-0000-1000-8000-00805f9b34fb"
 GARMIN_ID = "1A4EDA26-AA5E-0D73-27F1-211B33814D3C"
+GARMIN_ID = "F3FD4758-51E9-1BD3-36D9-80DF3F6C6B79"
 
 HR_MIN = 55
 HR_MAX = 180
 TREND_THRESHOLD = 5  # bpm difference needed before nudging target energy
-MIN_TRACK_DURATION = 90  # seconds a recommended track should play before switching
+MIN_TRACK_DURATION = 30  # seconds a recommended track should play before switching
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")

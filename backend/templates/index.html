@@ -24,6 +24,33 @@
       color: var(--text);
       font-family: "Space Grotesk", "Segoe UI", system-ui, -apple-system, sans-serif;
     }
+    .user-bar {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      background: rgba(18,24,38,0.9);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 10px;
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+      font-size: 0.9rem;
+      z-index: 1000;
+    }
+    .user-name { color: var(--text); }
+    .logout-btn {
+      padding: 6px 10px;
+      border: none;
+      border-radius: 8px;
+      background: var(--accent);
+      color: var(--panel);
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-block;
+    }
     .page {
       position: relative;
       padding: 20px;
@@ -162,6 +189,10 @@
   </style>
 </head>
 <body>
+  <div class="user-bar">
+    <span class="user-name">Hi, {{ session.username or "user" }}</span>
+    <a class="logout-btn" href="/logout">Logout</a>
+  </div>
   <div class="page">
     <div class="cards">
       <div class="card">

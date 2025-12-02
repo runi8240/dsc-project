@@ -60,7 +60,8 @@ class RecommenderService:
     """Maps heart-rate signals to the next track choice."""
 
     def __init__(self, data_path: Path | None = None, history_seconds: int = 60):
-        self.data_path = data_path or Path(__file__).with_name("data.csv")
+        default_path = Path(__file__).resolve().parents[2] / "data" / "data.csv"
+        self.data_path = data_path or default_path
         self.tracks = load_tracks(self.data_path)
         self.hr_history: Deque[int] = deque(maxlen=history_seconds)
 

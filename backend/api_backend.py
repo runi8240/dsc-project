@@ -2,6 +2,7 @@ import csv
 import time
 from pathlib import Path
 from typing import Dict, Optional
+import json
 
 import base64
 import os
@@ -11,16 +12,25 @@ import requests
 from flask import Flask, jsonify, render_template, request
 from flask_socketio import SocketIO
 
-from feedback_service import FeedbackLogger
-from recommender_service import RecommenderService
+from services.feedback_service import FeedbackLogger
+from services.recommender_service import RecommenderService
+from db import get_conn, init_db
 
-app = Flask(__name__)
+BASE_DIR = Path(__file__).resolve().parents[1]
+DATA_DIR = BASE_DIR / "data"
+CONFIG_DIR = BASE_DIR / "config"
+DATA_DIR.mkdir(exist_ok=True)
+CONFIG_DIR.mkdir(exist_ok=True)
+
+app = Flask(__name__, template_folder="templates")
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
-telemetry_path = Path(__file__).with_name("telemetry.csv")
-recommendations_path = Path(__file__).with_name("recommendations.csv")
-recommender = RecommenderService()
-feedback_logger = FeedbackLogger()
+DB_PATH = DATA_DIR / "app.db"
+init_db(DB_PATH)
+telemetry_path = DATA_DIR / "telemetry.csv"  # legacy, no longer used
+recommendations_path = DATA_DIR / "recommendations.csv"  # legacy, no longer used
+recommender = RecommenderService(data_path=DATA_DIR / "data.csv")
+feedback_logger = FeedbackLogger(output_path=DATA_DIR / "feedback.jsonl")
 
 latest_hr: Optional[int] = None
 latest_track: Optional[Dict[str, str]] = None
@@ -29,7 +39,10 @@ MIN_TRACK_DURATION = 30  # seconds a recommended track should play before switch
 
 # Secrets are loaded from environment or a local text file (not committed).
 # File format (lines): SPOTIFY_CLIENT_ID=..., SPOTIFY_CLIENT_SECRET=..., SPOTIFY_REFRESH_TOKEN=...
-SPOTIFY_CREDENTIALS_FILE = os.getenv("SPOTIFY_CREDENTIALS_FILE", "spotify_credentials.txt")
+SPOTIFY_CREDENTIALS_FILE = os.getenv(
+    "SPOTIFY_CREDENTIALS_FILE",
+    str(CONFIG_DIR / "spotify_credentials.txt"),
+)
 
 
 def _load_from_file() -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -62,33 +75,28 @@ SPOTIFY_SCOPES = "user-read-email user-read-private streaming user-modify-playba
 
 
 def append_telemetry_row(timestamp: float, hr: int) -> None:
-    is_new = not telemetry_path.exists()
-    with telemetry_path.open("a", newline="", encoding="utf-8") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=["timestamp", "hr"])
-        if is_new:
-            writer.writeheader()
-        writer.writerow({"timestamp": timestamp, "hr": hr})
+    with get_conn(DB_PATH) as conn:
+        conn.execute("INSERT INTO telemetry (timestamp, hr) VALUES (?, ?)", (timestamp, hr))
+        conn.commit()
 
 
 def append_recommendation_row(timestamp: float, track: Dict[str, str], hr: Optional[int]) -> None:
-    is_new = not recommendations_path.exists()
-    with recommendations_path.open("a", newline="", encoding="utf-8") as csvfile:
-        writer = csv.DictWriter(
-            csvfile,
-            fieldnames=["timestamp", "track_id", "track_name", "artists", "energy", "hr"],
+    with get_conn(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO recommendations (timestamp, track_id, track_name, artists, energy, hr)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                timestamp,
+                track.get("track_id"),
+                track.get("track_name"),
+                track.get("artists"),
+                track.get("energy"),
+                hr,
+            ),
         )
-        if is_new:
-            writer.writeheader()
-        writer.writerow(
-            {
-                "timestamp": timestamp,
-                "track_id": track.get("track_id"),
-                "track_name": track.get("track_name"),
-                "artists": track.get("artists"),
-                "energy": track.get("energy"),
-                "hr": hr,
-            }
-        )
+        conn.commit()
 
 
 def maybe_emit_recommendation() -> Optional[Dict[str, str]]:
@@ -161,6 +169,12 @@ def feedback():
     track_id = payload.get("track_id")
     metadata = payload.get("metadata") or {}
     event = feedback_logger.log(event_type=event_type, track_id=track_id, metadata=metadata)
+    with get_conn(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO feedback (timestamp, event_type, track_id, metadata) VALUES (?, ?, ?, ?)",
+            (event.timestamp, event.event_type, event.track_id, json.dumps(event.metadata)),
+        )
+        conn.commit()
     socketio.emit("feedback", {"event_type": event_type, "track_id": track_id})
     return jsonify({"status": "ok", "event": event.__dict__})
 

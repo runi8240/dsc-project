@@ -17,7 +17,9 @@ class FeedbackLogger:
     """Persist user feedback for future training."""
 
     def __init__(self, output_path: Path | None = None):
-        self.output_path = output_path or Path(__file__).with_name("feedback.jsonl")
+        default_path = Path(__file__).resolve().parents[2] / "data" / "feedback.jsonl"
+        self.output_path = output_path or default_path
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
 
     def log(self, event_type: str, track_id: str | None, metadata: Dict[str, Any] | None = None) -> FeedbackEvent:
         event = FeedbackEvent(

@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: dsc-backend
+    ports:
+      - "5001:5001"
+    environment:
+      - SPOTIFY_CREDENTIALS_FILE=/app/config/spotify_credentials.txt
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+    restart: unless-stopped

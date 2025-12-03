@@ -59,6 +59,10 @@
         <input id="username" name="username" type="text" required>
         <label for="password">Password</label>
         <input id="password" name="password" type="password" required>
+        <label for="rest_hr">Resting HR (bpm)</label>
+        <input id="rest_hr" name="rest_hr" type="number" min="30" max="120" placeholder="60">
+        <label for="max_hr">Max HR (bpm)</label>
+        <input id="max_hr" name="max_hr" type="number" min="120" max="220" placeholder="190">
         <button type="submit">Create Account</button>
       </form>
       {% if error %}

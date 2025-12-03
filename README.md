@@ -16,9 +16,14 @@
    export SPOTIFY_CREDENTIALS_FILE=$(pwd)/config/spotify_credentials.txt
    export SECRET_KEY="change-me"           # use a random string
    export AUTH_ENABLED=true                # default is true
+   export DEFAULT_USER_ID=demo-user        # used for ingestion/offline telemetry
+   export DEFAULT_REST_HR=60               # defaults for users who skip HR input
+   export DEFAULT_MAX_HR=190
    # Optional env user (can also sign up via UI/API):
    # export AUTH_USERNAME=demo
    # export AUTH_PASSWORD=demo
+   # export AUTH_REST_HR=58
+   # export AUTH_MAX_HR=188
    ```
 
 `config/spotify_credentials.txt` format:
@@ -45,6 +50,7 @@ export REDIS_URL=redis://localhost:6379/0   # use Redis stream path
 # or omit REDIS_URL to fall back to HTTP POST /telemetry
 python ingestion/ingestion_service.py
 ```
+Heart-rate samples are ingested globally; the backend associates them with the logged-in user when generating recommendations or storing feedback.
 Optional telemetry mirroring into object storage:
 ```bash
 export STORAGE_ENABLED=true
@@ -59,8 +65,9 @@ Flow: Garmin BLE → ingestion → Redis stream (`telemetry`) → backend → DB
 
 ## Auth
 - Web login at `/login`, signup at `/signup`. Sessions use `SECRET_KEY`.
+- Signup now captures resting and max heart-rate (defaults to 60/190 bpm if omitted).
 - API login/signup:
-  - `POST /auth/signup { "username": "...", "password": "..." }`
+  - `POST /auth/signup { "username": "...", "password": "...", "rest_hr": 58, "max_hr": 188 }`
   - `POST /auth/login { "username": "...", "password": "..." }`
 
 ## Frontend
@@ -70,8 +77,10 @@ Flow: Garmin BLE → ingestion → Redis stream (`telemetry`) → backend → DB
 
 ## Data & Storage
 - SQLite: `data/app.db` (tables: users, telemetry, recommendations, feedback)
+- Telemetry, recommendations, and feedback rows now capture `user_id` for personalized ML.
+- Disliked songs are tracked in `user_blacklist` so they are never re-recommended.
 - Local CSV: `data/data.csv` (seed tracks) is mirrored into object storage when the backend boots. If missing locally, it is downloaded from storage.
-- Raw telemetry/recommendation snapshots are uploaded to MinIO under `raw-telemetry/` and `recommendations/`.
+- Raw telemetry snapshots are uploaded to MinIO under `raw-telemetry/` (not user-specific) and recommendations/feedback are stored by user ID.
 - Legacy CSV/JSONL files remain in `data/` for reference.
 - Use `POST /storage/upload` (multipart form) to push arbitrary artifacts to the bucket when testing Cloud Storage-style workflows.
 - Inspect or download artifacts via the MinIO console or `mc` CLI (e.g., `mc alias set dsc http://localhost:9000 minio minio123`).
@@ -90,5 +99,6 @@ docker-compose logs -f backend   # shows “[redis] consumed telemetry ...”
 - `SECRET_KEY` (required for auth sessions)
 - `AUTH_ENABLED` (default `true`; set `false` to bypass login)
 - `AUTH_USERNAME`/`AUTH_PASSWORD`/`AUTH_USER_ID` (optional env user)
+- User profile defaults: `DEFAULT_USER_ID`, `DEFAULT_REST_HR`, `DEFAULT_MAX_HR`, `AUTH_REST_HR`, `AUTH_MAX_HR`
 - Storage: `STORAGE_ENABLED` (default `true` in Docker), `STORAGE_ENDPOINT`, `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY`, `STORAGE_BUCKET`, `STORAGE_SECURE`, `STORAGE_TRACKS_KEY`, `STORAGE_RECOMMENDATION_PREFIX`, `STORAGE_FEEDBACK_PREFIX`, `STORAGE_UPLOAD_PREFIX`
 - Ingestion-specific: `GARMIN_DEVICE_ID`, `BACKEND_TELEMETRY_URL` (used if no Redis), `STORAGE_TELEMETRY_PREFIX`, `STORAGE_BATCH_SIZE`, `STORAGE_FLUSH_SECONDS`, `INGESTION_SESSION_ID`

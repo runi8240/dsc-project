@@ -16,7 +16,8 @@ def init_db(db_path: Path) -> None:
         CREATE TABLE IF NOT EXISTS telemetry (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp REAL NOT NULL,
-            hr INTEGER NOT NULL
+            hr INTEGER NOT NULL,
+            user_id TEXT
         )
         """
     )
@@ -29,7 +30,8 @@ def init_db(db_path: Path) -> None:
             track_name TEXT,
             artists TEXT,
             energy REAL,
-            hr INTEGER
+            hr INTEGER,
+            user_id TEXT
         )
         """
     )
@@ -40,7 +42,8 @@ def init_db(db_path: Path) -> None:
             timestamp REAL NOT NULL,
             event_type TEXT NOT NULL,
             track_id TEXT,
-            metadata TEXT
+            metadata TEXT,
+            user_id TEXT
         )
         """
     )
@@ -49,7 +52,24 @@ def init_db(db_path: Path) -> None:
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT NOT NULL UNIQUE,
-            password_hash TEXT NOT NULL
+            password_hash TEXT NOT NULL,
+            rest_hr INTEGER DEFAULT 60,
+            max_hr INTEGER DEFAULT 190
+        )
+        """
+    )
+    _ensure_column(conn, "telemetry", "user_id", "TEXT")
+    _ensure_column(conn, "recommendations", "user_id", "TEXT")
+    _ensure_column(conn, "feedback", "user_id", "TEXT")
+    _ensure_column(conn, "users", "rest_hr", "INTEGER DEFAULT 60")
+    _ensure_column(conn, "users", "max_hr", "INTEGER DEFAULT 190")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_blacklist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            track_id TEXT NOT NULL,
+            UNIQUE(user_id, track_id)
         )
         """
     )
@@ -60,3 +80,11 @@ def init_db(db_path: Path) -> None:
 def insert_many(conn: sqlite3.Connection, query: str, rows: Iterable[Tuple]) -> None:
     conn.executemany(query, rows)
     conn.commit()
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
+            raise

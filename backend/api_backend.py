@@ -1,13 +1,11 @@
 import csv
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Set, Tuple
 import json
 
 import base64
 import os
-from typing import Tuple
-from functools import partial
 
 import requests
 from flask import Flask, jsonify, render_template, request, redirect, url_for, session
@@ -77,10 +75,19 @@ AUTH_USERNAME = os.getenv("AUTH_USERNAME")
 AUTH_PASSWORD = os.getenv("AUTH_PASSWORD")
 AUTH_USER_ID = os.getenv("AUTH_USER_ID", "demo-user")
 AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() == "true"
+DEFAULT_REST_HR = int(os.getenv("DEFAULT_REST_HR", "60"))
+DEFAULT_MAX_HR = int(os.getenv("DEFAULT_MAX_HR", "190"))
+AUTH_REST_HR = int(os.getenv("AUTH_REST_HR", str(DEFAULT_REST_HR)))
+AUTH_MAX_HR = int(os.getenv("AUTH_MAX_HR", str(DEFAULT_MAX_HR)))
+DEFAULT_USER_ID = os.getenv("DEFAULT_USER_ID") or AUTH_USER_ID or "demo-user"
 
-latest_hr: Optional[int] = None
-latest_track: Optional[Dict[str, str]] = None
-last_track_change: Optional[float] = None
+latest_global_hr: Optional[int] = None
+latest_global_hr_timestamp: Optional[float] = None
+user_hr_versions: Dict[str, float] = {}
+user_latest_hr: Dict[str, Optional[int]] = {}
+latest_track: Dict[str, Dict[str, object]] = {}
+last_track_change: Dict[str, float] = {}
+active_users: Set[str] = set()
 MIN_TRACK_DURATION = 30  # seconds a recommended track should play before switching
 
 # Secrets are loaded from environment or a local text file (not committed).
@@ -120,18 +127,65 @@ SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 SPOTIFY_SCOPES = "user-read-email user-read-private streaming user-modify-playback-state user-read-playback-state"
 
 
-def append_telemetry_row(timestamp: float, hr: int) -> None:
+def _normalize_user_id(user_id: Optional[str]) -> str:
+    resolved = user_id or DEFAULT_USER_ID
+    return str(resolved)
+
+
+def _user_profile_from_db(user_id: str) -> Optional[Dict[str, float]]:
+    try:
+        user_int_id = int(user_id)
+    except (TypeError, ValueError):
+        return None
     with get_conn(DB_PATH) as conn:
-        conn.execute("INSERT INTO telemetry (timestamp, hr) VALUES (?, ?)", (timestamp, hr))
+        row = conn.execute("SELECT rest_hr, max_hr FROM users WHERE id = ?", (user_int_id,)).fetchone()
+    if not row:
+        return None
+    return {"user_id": str(user_id), "rest_hr": row["rest_hr"] or DEFAULT_REST_HR, "max_hr": row["max_hr"] or DEFAULT_MAX_HR}
+
+
+def get_user_profile(user_id: Optional[str]) -> Dict[str, float]:
+    resolved = _normalize_user_id(user_id)
+    if AUTH_USERNAME and resolved == AUTH_USER_ID:
+        return {"user_id": resolved, "rest_hr": AUTH_REST_HR, "max_hr": AUTH_MAX_HR}
+    profile = _user_profile_from_db(resolved)
+    if profile:
+        return profile
+    return {"user_id": resolved, "rest_hr": DEFAULT_REST_HR, "max_hr": DEFAULT_MAX_HR}
+
+
+def parse_hr_value(value, default: int) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _ensure_user_hr(user_id: str) -> None:
+    if latest_global_hr is None or latest_global_hr_timestamp is None:
+        return
+    last_version = user_hr_versions.get(user_id)
+    if last_version == latest_global_hr_timestamp:
+        return
+    recommender.observe_hr(user_id, latest_global_hr)
+    user_hr_versions[user_id] = latest_global_hr_timestamp
+    user_latest_hr[user_id] = latest_global_hr
+
+
+def append_telemetry_row(timestamp: float, hr: int, user_id: Optional[str]) -> None:
+    with get_conn(DB_PATH) as conn:
+        conn.execute("INSERT INTO telemetry (timestamp, hr, user_id) VALUES (?, ?, ?)", (timestamp, hr, user_id))
         conn.commit()
 
 
-def append_recommendation_row(timestamp: float, track: Dict[str, str], hr: Optional[int]) -> None:
+def append_recommendation_row(timestamp: float, track: Dict[str, str], hr: Optional[int], user_id: str) -> None:
     with get_conn(DB_PATH) as conn:
         conn.execute(
             """
-            INSERT INTO recommendations (timestamp, track_id, track_name, artists, energy, hr)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO recommendations (timestamp, track_id, track_name, artists, energy, hr, user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 timestamp,
@@ -140,22 +194,34 @@ def append_recommendation_row(timestamp: float, track: Dict[str, str], hr: Optio
                 track.get("artists"),
                 track.get("energy"),
                 hr,
+                user_id,
             ),
         )
         conn.commit()
-    _persist_recommendation_artifact(timestamp, track, hr)
+    _persist_recommendation_artifact(timestamp, track, hr, user_id)
 
 
-def _persist_recommendation_artifact(timestamp: float, track: Dict[str, str], hr: Optional[int]) -> None:
+def _serialize_track(track: Dict[str, object]) -> Dict[str, object]:
+    payload = {}
+    for key, value in track.items():
+        if isinstance(value, set):
+            payload[key] = list(value)
+        else:
+            payload[key] = value
+    return payload
+
+
+def _persist_recommendation_artifact(timestamp: float, track: Dict[str, str], hr: Optional[int], user_id: str) -> None:
     if not storage_client.enabled:
         return
-    key = f"{STORAGE_RECOMMENDATION_PREFIX}/{int(timestamp * 1000)}_{track.get('track_id', 'unknown')}.json"
+    key = f"{STORAGE_RECOMMENDATION_PREFIX}/{user_id}/{int(timestamp * 1000)}_{track.get('track_id', 'unknown')}.json"
     storage_client.upload_json(
         key,
         {
             "timestamp": timestamp,
-            "track": track,
+            "track": _serialize_track(track),
             "hr": hr,
+            "user_id": user_id,
         },
     )
 
@@ -163,7 +229,7 @@ def _persist_recommendation_artifact(timestamp: float, track: Dict[str, str], hr
 def _persist_feedback_artifact(event) -> None:
     if not storage_client.enabled:
         return
-    key = f"{STORAGE_FEEDBACK_PREFIX}/{int(event.timestamp * 1000)}_{event.event_type}.json"
+    key = f"{STORAGE_FEEDBACK_PREFIX}/{event.user_id or 'unknown'}/{int(event.timestamp * 1000)}_{event.event_type}.json"
     storage_client.upload_json(
         key,
         {
@@ -171,41 +237,71 @@ def _persist_feedback_artifact(event) -> None:
             "track_id": event.track_id,
             "timestamp": event.timestamp,
             "metadata": event.metadata,
+            "user_id": event.user_id,
         },
     )
 
 
-def maybe_emit_recommendation(force_switch: bool = False) -> Optional[Dict[str, str]]:
-    global latest_track, last_track_change
-    track = recommender.recommend()
+def get_blacklist(user_id: str) -> List[str]:
+    if not user_id:
+        return []
+    with get_conn(DB_PATH) as conn:
+        rows = conn.execute("SELECT track_id FROM user_blacklist WHERE user_id = ?", (user_id,)).fetchall()
+    return [row["track_id"] for row in rows if row["track_id"]]
+
+
+def add_to_blacklist(user_id: str, track_id: Optional[str]) -> None:
+    if not track_id:
+        return
+    with get_conn(DB_PATH) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO user_blacklist (user_id, track_id) VALUES (?, ?)",
+            (user_id, track_id),
+        )
+        conn.commit()
+
+
+def maybe_emit_recommendation(user_profile: Dict[str, float], force_switch: bool = False) -> Optional[Dict[str, str]]:
+    user_id = user_profile["user_id"]
+    _ensure_user_hr(user_id)
+    current_track = latest_track.get(user_id)
+    track = recommender.recommend(
+        user_profile=user_profile,
+        user_id=user_id,
+        latest_track=current_track,
+        blacklist=get_blacklist(user_id),
+    )
     if not track:
         return None
 
     now = time.time()
-    should_switch = force_switch
+    should_switch = force_switch or current_track is None
+    last_change = last_track_change.get(user_id)
 
-    if latest_track is None:
-        should_switch = True
-    elif track["track_id"] != latest_track.get("track_id"):
-        if force_switch or last_track_change is None or now - last_track_change >= MIN_TRACK_DURATION:
-            should_switch = True
+    if not should_switch and current_track:
+        if track["track_id"] != current_track.get("track_id"):
+            if force_switch or last_change is None or now - last_change >= MIN_TRACK_DURATION:
+                should_switch = True
 
     if should_switch:
-        latest_track = track
-        last_track_change = now
-        append_recommendation_row(now, track, latest_hr)
-        socketio.emit("track", track)
+        latest_track[user_id] = track
+        last_track_change[user_id] = now
+        append_recommendation_row(now, track, user_latest_hr.get(user_id), user_id)
+        socketio.emit("track", {"user_id": user_id, **_serialize_track(track)})
 
     return track
 
 
 def handle_telemetry(hr: int, timestamp: float):
-    global latest_hr
-    latest_hr = hr
-    recommender.observe_hr(hr)
-    append_telemetry_row(timestamp, hr)
+    global latest_global_hr, latest_global_hr_timestamp
+    latest_global_hr = hr
+    latest_global_hr_timestamp = timestamp
+    append_telemetry_row(timestamp, hr, None)
     socketio.emit("hr", {"hr": hr})
-    maybe_emit_recommendation()
+    target_users = active_users or {DEFAULT_USER_ID}
+    for uid in target_users:
+        profile = get_user_profile(uid)
+        maybe_emit_recommendation(profile)
 
 
 def _redis_handler(data: Dict):
@@ -249,10 +345,19 @@ def telemetry():
 
 @app.route("/recommendation", methods=["GET"])
 def recommendation():
-    track = recommender.recommend()
+    requested_user = request.args.get("user_id") or session.get("user_id")
+    profile = get_user_profile(requested_user)
+    user_id = profile["user_id"]
+    _ensure_user_hr(user_id)
+    track = recommender.recommend(
+        user_profile=profile,
+        user_id=user_id,
+        latest_track=latest_track.get(user_id),
+        blacklist=get_blacklist(user_id),
+    )
     if not track:
         return jsonify({"error": "No track available"}), 404
-    return jsonify(track)
+    return jsonify(_serialize_track(track) | {"user_id": user_id})
 
 
 @app.route("/feedback", methods=["POST"])
@@ -263,21 +368,25 @@ def feedback():
         return jsonify({"error": "event_type is required"}), 400
     track_id = payload.get("track_id")
     metadata = payload.get("metadata") or {}
-    if AUTH_ENABLED and session.get("user_id"):
-        metadata = {**metadata, "user_id": session["user_id"]}
-    event = feedback_logger.log(event_type=event_type, track_id=track_id, metadata=metadata)
+    requested_user = payload.get("user_id") or session.get("user_id")
+    profile = get_user_profile(requested_user)
+    resolved_user_id = profile["user_id"]
+    metadata = {**metadata, "user_id": resolved_user_id}
+    event = feedback_logger.log(event_type=event_type, track_id=track_id, metadata=metadata, user_id=resolved_user_id)
     with get_conn(DB_PATH) as conn:
         conn.execute(
-            "INSERT INTO feedback (timestamp, event_type, track_id, metadata) VALUES (?, ?, ?, ?)",
-            (event.timestamp, event.event_type, event.track_id, json.dumps(event.metadata)),
+            "INSERT INTO feedback (timestamp, event_type, track_id, metadata, user_id) VALUES (?, ?, ?, ?, ?)",
+            (event.timestamp, event.event_type, event.track_id, json.dumps(event.metadata), resolved_user_id),
         )
         conn.commit()
     _persist_feedback_artifact(event)
-    socketio.emit("feedback", {"event_type": event_type, "track_id": track_id})
+    socketio.emit("feedback", {"event_type": event_type, "track_id": track_id, "user_id": resolved_user_id})
     new_track = None
     if event_type == "dislike":
-        new_track = maybe_emit_recommendation(force_switch=True)
-    return jsonify({"status": "ok", "event": event.__dict__, "track": new_track})
+        add_to_blacklist(resolved_user_id, track_id)
+        new_track = maybe_emit_recommendation(profile, force_switch=True)
+    serialized_track = _serialize_track(new_track) if new_track else None
+    return jsonify({"status": "ok", "event": event.__dict__, "track": serialized_track})
 
 
 @app.route("/storage/upload", methods=["POST"])
@@ -292,7 +401,8 @@ def storage_upload():
     key_override = (request.form.get("key") or "").lstrip("/")
     safe_name = secure_filename(upload.filename)
     timestamp_prefix = int(time.time() * 1000)
-    storage_key = key_override or f"{STORAGE_UPLOAD_PREFIX}/{timestamp_prefix}_{safe_name}"
+    owner = _normalize_user_id(session.get("user_id"))
+    storage_key = key_override or f"{STORAGE_UPLOAD_PREFIX}/{owner}/{timestamp_prefix}_{safe_name}"
     if not storage_key:
         return jsonify({"error": "invalid key"}), 400
     contents = upload.read()
@@ -301,7 +411,7 @@ def storage_upload():
     ok = storage_client.upload_bytes(storage_key, contents, upload.mimetype or "application/octet-stream")
     if not ok:
         return jsonify({"error": "failed to store file"}), 500
-    return jsonify({"status": "uploaded", "key": storage_key})
+    return jsonify({"status": "uploaded", "key": storage_key, "user_id": owner})
 
 
 def _spotify_auth_header() -> Dict[str, str]:
@@ -348,9 +458,9 @@ def auth_login():
     user = _verify_credentials(username, password)
     if not user:
         return jsonify({"error": "invalid credentials"}), 401
-    session["user_id"] = user["id"]
+    session["user_id"] = str(user["id"])
     session["username"] = user["username"]
-    return jsonify({"status": "ok", "user_id": user["id"], "username": user["username"]})
+    return jsonify({"status": "ok", "user_id": str(user["id"]), "username": user["username"]})
 
 
 @app.route("/auth/signup", methods=["POST"])
@@ -362,12 +472,14 @@ def auth_signup():
     password = payload.get("password")
     if not username or not password:
         return jsonify({"error": "username and password required"}), 400
-    user_id = _create_user(username, password)
+    rest_hr = parse_hr_value(payload.get("rest_hr"), DEFAULT_REST_HR)
+    max_hr = parse_hr_value(payload.get("max_hr"), DEFAULT_MAX_HR)
+    user_id = _create_user(username, password, rest_hr=rest_hr, max_hr=max_hr)
     if not user_id:
         return jsonify({"error": "username already exists"}), 409
-    session["user_id"] = user_id
+    session["user_id"] = str(user_id)
     session["username"] = username
-    return jsonify({"status": "ok", "user_id": user_id, "username": username})
+    return jsonify({"status": "ok", "user_id": str(user_id), "username": username})
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -379,7 +491,7 @@ def login():
         password = request.form.get("password")
         user = _verify_credentials(username, password)
         if user:
-            session["user_id"] = user["id"]
+            session["user_id"] = str(user["id"])
             session["username"] = user["username"]
             return redirect(url_for("index"))
         return render_template("login.html", error="Invalid credentials")
@@ -399,12 +511,14 @@ def signup():
     if request.method == "POST":
         username = request.form.get("username")
         password = request.form.get("password")
+        rest_hr = parse_hr_value(request.form.get("rest_hr"), DEFAULT_REST_HR)
+        max_hr = parse_hr_value(request.form.get("max_hr"), DEFAULT_MAX_HR)
         if not username or not password:
             return render_template("signup.html", error="Username and password required")
-        user_id = _create_user(username, password)
+        user_id = _create_user(username, password, rest_hr=rest_hr, max_hr=max_hr)
         if not user_id:
             return render_template("signup.html", error="Username already exists")
-        session["user_id"] = user_id
+        session["user_id"] = str(user_id)
         session["username"] = username
         return redirect(url_for("index"))
     return render_template("signup.html", error=None)
@@ -416,21 +530,29 @@ def _verify_credentials(username: str, password: str):
         return {"id": AUTH_USER_ID, "username": AUTH_USERNAME}
     # DB user lookup
     with get_conn(DB_PATH) as conn:
-        row = conn.execute("SELECT id, username, password_hash FROM users WHERE username = ?", (username,)).fetchone()
+        row = conn.execute(
+            "SELECT id, username, password_hash, rest_hr, max_hr FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
     if not row:
         return None
     if check_password_hash(row["password_hash"], password):
-        return {"id": row["id"], "username": row["username"]}
+        return {
+            "id": str(row["id"]),
+            "username": row["username"],
+            "rest_hr": row["rest_hr"],
+            "max_hr": row["max_hr"],
+        }
     return None
 
 
-def _create_user(username: str, password: str):
+def _create_user(username: str, password: str, *, rest_hr: int, max_hr: int):
     pwd_hash = generate_password_hash(password)
     with get_conn(DB_PATH) as conn:
         try:
             cur = conn.execute(
-                "INSERT INTO users (username, password_hash) VALUES (?, ?)",
-                (username, pwd_hash),
+                "INSERT INTO users (username, password_hash, rest_hr, max_hr) VALUES (?, ?, ?, ?)",
+                (username, pwd_hash, rest_hr, max_hr),
             )
             conn.commit()
             return cur.lastrowid
@@ -442,10 +564,19 @@ def _create_user(username: str, password: str):
 def send_last_value():
     if AUTH_ENABLED and not session.get("user_id"):
         return False
-    if latest_hr is not None:
-        socketio.emit("hr", {"hr": latest_hr})
-    if latest_track is not None:
-        socketio.emit("track", latest_track)
+    user_id = _normalize_user_id(session.get("user_id"))
+    active_users.add(user_id)
+    if latest_global_hr is not None:
+        socketio.emit("hr", {"hr": latest_global_hr}, to=request.sid)
+    last_track = latest_track.get(user_id)
+    if last_track is not None:
+        socketio.emit("track", {"user_id": user_id, **_serialize_track(last_track)}, to=request.sid)
+
+
+@socketio.on("disconnect")
+def handle_disconnect():
+    user_id = _normalize_user_id(session.get("user_id"))
+    active_users.discard(user_id)
 
 
 if __name__ == "__main__":

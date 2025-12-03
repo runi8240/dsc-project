@@ -10,6 +10,7 @@ class FeedbackEvent:
     event_type: str
     track_id: Optional[str]
     timestamp: float
+    user_id: Optional[str]
     metadata: Dict[str, Any]
 
 
@@ -21,11 +22,18 @@ class FeedbackLogger:
         self.output_path = output_path or default_path
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def log(self, event_type: str, track_id: str | None, metadata: Dict[str, Any] | None = None) -> FeedbackEvent:
+    def log(
+        self,
+        event_type: str,
+        track_id: str | None,
+        metadata: Dict[str, Any] | None = None,
+        user_id: str | None = None,
+    ) -> FeedbackEvent:
         event = FeedbackEvent(
             event_type=event_type,
             track_id=track_id,
             timestamp=time.time(),
+            user_id=user_id,
             metadata=metadata or {},
         )
         self._append_event(event)

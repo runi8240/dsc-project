@@ -105,7 +105,13 @@ def telemetry_worker() -> None:
 
         try:
             if redis_client:
-                redis_client.xadd(REDIS_STREAM_KEY, {"hr": payload["hr"], "timestamp": payload["timestamp"]})
+                redis_client.xadd(
+                    REDIS_STREAM_KEY,
+                    {
+                        "hr": payload["hr"],
+                        "timestamp": payload["timestamp"],
+                    },
+                )
             else:
                 requests.post(BACKEND_TELEMETRY_URL, json=payload, timeout=POST_TIMEOUT)
             _buffer_storage_payload(payload)

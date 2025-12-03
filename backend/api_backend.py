@@ -13,9 +13,11 @@ import requests
 from flask import Flask, jsonify, render_template, request, redirect, url_for, session
 from flask_socketio import SocketIO
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 
 from services.feedback_service import FeedbackLogger
 from services.recommender_service import RecommenderService
+from services.storage_service import StorageClient
 from db import get_conn, init_db
 from redis_consumer import RedisStreamConsumer
 
@@ -33,8 +35,42 @@ DB_PATH = DATA_DIR / "app.db"
 init_db(DB_PATH)
 telemetry_path = DATA_DIR / "telemetry.csv"  # legacy, no longer used
 recommendations_path = DATA_DIR / "recommendations.csv"  # legacy, no longer used
-recommender = RecommenderService(data_path=DATA_DIR / "data.csv")
 feedback_logger = FeedbackLogger(output_path=DATA_DIR / "feedback.jsonl")
+STORAGE_ENABLED = os.getenv("STORAGE_ENABLED", "false").lower() == "true"
+STORAGE_ENDPOINT = os.getenv("STORAGE_ENDPOINT", "http://localhost:9000")
+STORAGE_ACCESS_KEY = os.getenv("STORAGE_ACCESS_KEY", "minio")
+STORAGE_SECRET_KEY = os.getenv("STORAGE_SECRET_KEY", "minio123")
+STORAGE_BUCKET = os.getenv("STORAGE_BUCKET", "dsc-artifacts")
+STORAGE_SECURE = os.getenv("STORAGE_SECURE", "false").lower() == "true"
+STORAGE_TRACKS_KEY = os.getenv("STORAGE_TRACKS_KEY", "seed-data/data.csv")
+STORAGE_RECOMMENDATION_PREFIX = os.getenv("STORAGE_RECOMMENDATION_PREFIX", "recommendations")
+STORAGE_FEEDBACK_PREFIX = os.getenv("STORAGE_FEEDBACK_PREFIX", "feedback")
+STORAGE_UPLOAD_PREFIX = os.getenv("STORAGE_UPLOAD_PREFIX", "uploads")
+storage_client = StorageClient(
+    enabled=STORAGE_ENABLED,
+    endpoint=STORAGE_ENDPOINT,
+    access_key=STORAGE_ACCESS_KEY,
+    secret_key=STORAGE_SECRET_KEY,
+    bucket=STORAGE_BUCKET,
+    secure=STORAGE_SECURE,
+    base_path=DATA_DIR,
+)
+
+
+def _ensure_seed_tracks():
+    if not storage_client.enabled:
+        return
+    local_tracks = DATA_DIR / "data.csv"
+    if local_tracks.exists():
+        storage_client.upload_file(local_tracks, STORAGE_TRACKS_KEY, content_type="text/csv")
+        return
+    downloaded = storage_client.download_file(STORAGE_TRACKS_KEY, local_tracks)
+    if downloaded:
+        print("[storage] pulled seed tracks from bucket")
+
+
+_ensure_seed_tracks()
+recommender = RecommenderService(data_path=DATA_DIR / "data.csv")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 REDIS_STREAM_KEY = os.getenv("REDIS_STREAM_KEY", "telemetry")
 AUTH_USERNAME = os.getenv("AUTH_USERNAME")
@@ -107,6 +143,36 @@ def append_recommendation_row(timestamp: float, track: Dict[str, str], hr: Optio
             ),
         )
         conn.commit()
+    _persist_recommendation_artifact(timestamp, track, hr)
+
+
+def _persist_recommendation_artifact(timestamp: float, track: Dict[str, str], hr: Optional[int]) -> None:
+    if not storage_client.enabled:
+        return
+    key = f"{STORAGE_RECOMMENDATION_PREFIX}/{int(timestamp * 1000)}_{track.get('track_id', 'unknown')}.json"
+    storage_client.upload_json(
+        key,
+        {
+            "timestamp": timestamp,
+            "track": track,
+            "hr": hr,
+        },
+    )
+
+
+def _persist_feedback_artifact(event) -> None:
+    if not storage_client.enabled:
+        return
+    key = f"{STORAGE_FEEDBACK_PREFIX}/{int(event.timestamp * 1000)}_{event.event_type}.json"
+    storage_client.upload_json(
+        key,
+        {
+            "event_type": event.event_type,
+            "track_id": event.track_id,
+            "timestamp": event.timestamp,
+            "metadata": event.metadata,
+        },
+    )
 
 
 def maybe_emit_recommendation(force_switch: bool = False) -> Optional[Dict[str, str]]:
@@ -206,11 +272,36 @@ def feedback():
             (event.timestamp, event.event_type, event.track_id, json.dumps(event.metadata)),
         )
         conn.commit()
+    _persist_feedback_artifact(event)
     socketio.emit("feedback", {"event_type": event_type, "track_id": track_id})
     new_track = None
     if event_type == "dislike":
         new_track = maybe_emit_recommendation(force_switch=True)
     return jsonify({"status": "ok", "event": event.__dict__, "track": new_track})
+
+
+@app.route("/storage/upload", methods=["POST"])
+def storage_upload():
+    if not storage_client.enabled:
+        return jsonify({"error": "storage disabled"}), 400
+    if AUTH_ENABLED and not session.get("user_id"):
+        return jsonify({"error": "auth required"}), 401
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        return jsonify({"error": "file is required"}), 400
+    key_override = (request.form.get("key") or "").lstrip("/")
+    safe_name = secure_filename(upload.filename)
+    timestamp_prefix = int(time.time() * 1000)
+    storage_key = key_override or f"{STORAGE_UPLOAD_PREFIX}/{timestamp_prefix}_{safe_name}"
+    if not storage_key:
+        return jsonify({"error": "invalid key"}), 400
+    contents = upload.read()
+    if not contents:
+        return jsonify({"error": "file is empty"}), 400
+    ok = storage_client.upload_bytes(storage_key, contents, upload.mimetype or "application/octet-stream")
+    if not ok:
+        return jsonify({"error": "failed to store file"}), 500
+    return jsonify({"status": "uploaded", "key": storage_key})
 
 
 def _spotify_auth_header() -> Dict[str, str]:

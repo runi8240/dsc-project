@@ -12,9 +12,16 @@ services:
       - SPOTIFY_CREDENTIALS_FILE=/app/config/spotify_credentials.txt
       - REDIS_URL=redis://redis:6379/0
       - REDIS_STREAM_KEY=telemetry
+      - STORAGE_ENABLED=true
+      - STORAGE_ENDPOINT=http://storage:9000
+      - STORAGE_ACCESS_KEY=minio
+      - STORAGE_SECRET_KEY=minio123
+      - STORAGE_BUCKET=dsc-artifacts
+      - STORAGE_SECURE=false
     volumes:
       - ./data:/app/data
       - ./config:/app/config
+      - ./storage:/app/storage
     restart: unless-stopped
 
   redis:
@@ -22,4 +29,18 @@ services:
     container_name: dsc-redis
     ports:
       - "6379:6379"
+    restart: unless-stopped
+
+  storage:
+    image: minio/minio:RELEASE.2024-04-18T19-09-19Z
+    container_name: dsc-storage
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=minio
+      - MINIO_ROOT_PASSWORD=minio123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ./storage:/data
     restart: unless-stopped

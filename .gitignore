@@ -1,0 +1,22 @@
+# Virtual environments & Python artifacts
+.venv/
+*.pyc
+__pycache__/
+
+# macOS clutter
+.DS_Store
+
+# Local configuration/secrets
+.env
+config/
+
+# Runtime data generated locally
+data/app.db
+data/feedback.jsonl
+data/telemetry.csv
+data/recommendations.csv
+storage/
+
+# Editor settings
+.idea/
+.vscode/

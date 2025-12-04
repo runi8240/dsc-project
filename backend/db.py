@@ -73,6 +73,20 @@ def init_db(db_path: Path) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_likes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            track_id TEXT NOT NULL,
+            energy REAL,
+            danceability REAL,
+            tempo REAL,
+            valence REAL,
+            UNIQUE(user_id, track_id)
+        )
+        """
+    )
     conn.commit()
     conn.close()
 

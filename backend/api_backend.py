@@ -1,7 +1,8 @@
 import csv
 import time
+from collections import deque
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Deque, Dict, List, Optional, Set, Tuple
 import json
 
 import base64
@@ -80,6 +81,7 @@ DEFAULT_MAX_HR = int(os.getenv("DEFAULT_MAX_HR", "190"))
 AUTH_REST_HR = int(os.getenv("AUTH_REST_HR", str(DEFAULT_REST_HR)))
 AUTH_MAX_HR = int(os.getenv("AUTH_MAX_HR", str(DEFAULT_MAX_HR)))
 DEFAULT_USER_ID = os.getenv("DEFAULT_USER_ID") or AUTH_USER_ID or "demo-user"
+SESSION_HISTORY_LIMIT = int(os.getenv("SESSION_HISTORY_LIMIT", "5"))
 
 latest_global_hr: Optional[int] = None
 latest_global_hr_timestamp: Optional[float] = None
@@ -88,6 +90,7 @@ user_latest_hr: Dict[str, Optional[int]] = {}
 latest_track: Dict[str, Dict[str, object]] = {}
 last_track_change: Dict[str, float] = {}
 active_users: Set[str] = set()
+session_track_history: Dict[str, Deque[str]] = {}
 MIN_TRACK_DURATION = 30  # seconds a recommended track should play before switching
 
 # Secrets are loaded from environment or a local text file (not committed).
@@ -161,6 +164,14 @@ def parse_hr_value(value, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _get_session_history(user_id: str) -> Deque[str]:
+    history = session_track_history.get(user_id)
+    if history is None:
+        history = deque(maxlen=SESSION_HISTORY_LIMIT)
+        session_track_history[user_id] = history
+    return history
 
 
 def _ensure_user_hr(user_id: str) -> None:
@@ -261,15 +272,82 @@ def add_to_blacklist(user_id: str, track_id: Optional[str]) -> None:
         conn.commit()
 
 
+def record_user_like(user_id: str, track: Optional[Dict[str, object]]) -> None:
+    if not user_id or not track:
+        return
+    track_id = track.get("track_id") or track.get("id")
+    energy = track.get("energy")
+    danceability = track.get("danceability")
+    tempo = track.get("tempo")
+    valence = track.get("valence")
+    if track_id is None:
+        return
+    with get_conn(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO user_likes (user_id, track_id, energy, danceability, tempo, valence)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                track_id,
+                energy,
+                danceability,
+                tempo,
+                valence,
+            ),
+        )
+        conn.commit()
+
+
+def remove_user_like(user_id: str, track_id: Optional[str]) -> None:
+    if not user_id or not track_id:
+        return
+    with get_conn(DB_PATH) as conn:
+        conn.execute("DELETE FROM user_likes WHERE user_id = ? AND track_id = ?", (user_id, track_id))
+        conn.commit()
+
+
+def get_user_preference_vector(user_id: str) -> Optional[List[float]]:
+    if not user_id:
+        return None
+    with get_conn(DB_PATH) as conn:
+        row = conn.execute(
+            """
+            SELECT AVG(danceability) AS danceability,
+                   AVG(energy) AS energy,
+                   AVG(tempo) AS tempo,
+                   AVG(valence) AS valence
+            FROM user_likes
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+    if not row or row["energy"] is None:
+        return None
+    danceability = row["danceability"] or 0.5
+    energy = row["energy"] or 0.5
+    tempo = row["tempo"] or 120.0
+    valence = row["valence"] or 0.5
+    return [danceability, energy, tempo / 200.0, valence]
+
+
 def maybe_emit_recommendation(user_profile: Dict[str, float], force_switch: bool = False) -> Optional[Dict[str, str]]:
     user_id = user_profile["user_id"]
     _ensure_user_hr(user_id)
     current_track = latest_track.get(user_id)
+    preference_vector = get_user_preference_vector(user_id)
+    session_history = _get_session_history(user_id)
+    exclude_ids = set(session_history)
+    if current_track and current_track.get("track_id"):
+        exclude_ids.add(current_track["track_id"])
     track = recommender.recommend(
         user_profile=user_profile,
         user_id=user_id,
         latest_track=current_track,
         blacklist=get_blacklist(user_id),
+        preference_vector=preference_vector,
+        exclude_track_ids=exclude_ids if exclude_ids else None,
     )
     if not track:
         return None
@@ -287,6 +365,9 @@ def maybe_emit_recommendation(user_profile: Dict[str, float], force_switch: bool
         latest_track[user_id] = track
         last_track_change[user_id] = now
         append_recommendation_row(now, track, user_latest_hr.get(user_id), user_id)
+        track_id = track.get("track_id")
+        if track_id:
+            session_history.append(track_id)
         socketio.emit("track", {"user_id": user_id, **_serialize_track(track)})
 
     return track
@@ -349,11 +430,18 @@ def recommendation():
     profile = get_user_profile(requested_user)
     user_id = profile["user_id"]
     _ensure_user_hr(user_id)
+    current_track = latest_track.get(user_id)
+    session_history = _get_session_history(user_id)
+    exclude_ids = set(session_history)
+    if current_track and current_track.get("track_id"):
+        exclude_ids.add(current_track["track_id"])
     track = recommender.recommend(
         user_profile=profile,
         user_id=user_id,
-        latest_track=latest_track.get(user_id),
+        latest_track=current_track,
         blacklist=get_blacklist(user_id),
+        preference_vector=get_user_preference_vector(user_id),
+        exclude_track_ids=exclude_ids or None,
     )
     if not track:
         return jsonify({"error": "No track available"}), 404
@@ -372,6 +460,7 @@ def feedback():
     profile = get_user_profile(requested_user)
     resolved_user_id = profile["user_id"]
     metadata = {**metadata, "user_id": resolved_user_id}
+    track_metadata = recommender.get_track(track_id) or latest_track.get(resolved_user_id)
     event = feedback_logger.log(event_type=event_type, track_id=track_id, metadata=metadata, user_id=resolved_user_id)
     with get_conn(DB_PATH) as conn:
         conn.execute(
@@ -384,7 +473,12 @@ def feedback():
     new_track = None
     if event_type == "dislike":
         add_to_blacklist(resolved_user_id, track_id)
+        remove_user_like(resolved_user_id, track_id)
         new_track = maybe_emit_recommendation(profile, force_switch=True)
+    elif event_type == "like":
+        record_user_like(resolved_user_id, track_metadata)
+    elif event_type == "neutral":
+        remove_user_like(resolved_user_id, track_id)
     serialized_track = _serialize_track(new_track) if new_track else None
     return jsonify({"status": "ok", "event": event.__dict__, "track": serialized_track})
 
@@ -566,6 +660,7 @@ def send_last_value():
         return False
     user_id = _normalize_user_id(session.get("user_id"))
     active_users.add(user_id)
+    _get_session_history(user_id)
     if latest_global_hr is not None:
         socketio.emit("hr", {"hr": latest_global_hr}, to=request.sid)
     last_track = latest_track.get(user_id)
@@ -577,6 +672,7 @@ def send_last_value():
 def handle_disconnect():
     user_id = _normalize_user_id(session.get("user_id"))
     active_users.discard(user_id)
+    session_track_history.pop(user_id, None)
 
 
 if __name__ == "__main__":

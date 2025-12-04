@@ -77,7 +77,9 @@ Flow: Garmin BLE → ingestion → Redis stream (`telemetry`) → backend → DB
 
 ## Data & Storage
 - SQLite: `data/app.db` (tables: users, telemetry, recommendations, feedback)
-- Telemetry, recommendations, and feedback rows now capture `user_id` for personalized ML.
+- Telemetry, recommendations, feedback, and user preference tables (`user_likes`, `user_blacklist`) capture `user_id` for personalized ML.
+- “Like” feedback snapshots track features of each track; the recommender keeps a running average to steer future picks toward similar songs near the current heart-rate intensity.
+- A rolling per-session history (default 5 tracks) prevents the same song from being recommended twice in one listening session; override via `SESSION_HISTORY_LIMIT`.
 - Disliked songs are tracked in `user_blacklist` so they are never re-recommended.
 - Local CSV: `data/data.csv` (seed tracks) is mirrored into object storage when the backend boots. If missing locally, it is downloaded from storage.
 - Raw telemetry snapshots are uploaded to MinIO under `raw-telemetry/` (not user-specific) and recommendations/feedback are stored by user ID.
@@ -100,5 +102,6 @@ docker-compose logs -f backend   # shows “[redis] consumed telemetry ...”
 - `AUTH_ENABLED` (default `true`; set `false` to bypass login)
 - `AUTH_USERNAME`/`AUTH_PASSWORD`/`AUTH_USER_ID` (optional env user)
 - User profile defaults: `DEFAULT_USER_ID`, `DEFAULT_REST_HR`, `DEFAULT_MAX_HR`, `AUTH_REST_HR`, `AUTH_MAX_HR`
+- Recommendation session control: `SESSION_HISTORY_LIMIT` (default 5)
 - Storage: `STORAGE_ENABLED` (default `true` in Docker), `STORAGE_ENDPOINT`, `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY`, `STORAGE_BUCKET`, `STORAGE_SECURE`, `STORAGE_TRACKS_KEY`, `STORAGE_RECOMMENDATION_PREFIX`, `STORAGE_FEEDBACK_PREFIX`, `STORAGE_UPLOAD_PREFIX`
 - Ingestion-specific: `GARMIN_DEVICE_ID`, `BACKEND_TELEMETRY_URL` (used if no Redis), `STORAGE_TELEMETRY_PREFIX`, `STORAGE_BATCH_SIZE`, `STORAGE_FLUSH_SECONDS`, `INGESTION_SESSION_ID`

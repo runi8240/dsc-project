@@ -3,7 +3,7 @@ import csv
 import math
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Deque, Dict, List, Optional, Sequence, Tuple
+from typing import Deque, Dict, List, Optional, Sequence, Tuple, Set
 
 TREND_THRESHOLD = 5  # bpm difference needed before nudging target energy
 
@@ -84,6 +84,7 @@ class RecommenderService:
         default_path = Path(__file__).resolve().parents[2] / "data" / "data.csv"
         self.data_path = data_path or default_path
         self.tracks = load_tracks(self.data_path)
+        self.track_index = {track["id"]: track for track in self.tracks}
         self.hr_history: Dict[str, Deque[int]] = defaultdict(lambda: deque(maxlen=history_seconds))
 
     def observe_hr(self, user_id: str, hr: int) -> None:
@@ -97,6 +98,11 @@ class RecommenderService:
         avg_previous = sum(previous) / len(previous)
         return history[-1] - avg_previous
 
+    def get_track(self, track_id: Optional[str]) -> Optional[Dict[str, object]]:
+        if not track_id:
+            return None
+        return self.track_index.get(track_id)
+
     def recommend(
         self,
         *,
@@ -104,6 +110,8 @@ class RecommenderService:
         user_id: str,
         latest_track: Optional[Dict[str, object]],
         blacklist: List[str] | set[str],
+        preference_vector: Optional[List[float]] = None,
+        exclude_track_ids: Optional[Set[str]] = None,
     ) -> Optional[Dict[str, object]]:
         """Pick the next track using a multi-factor score."""
         history = self.hr_history.get(user_id)
@@ -128,11 +136,13 @@ class RecommenderService:
         target_vector = [target_dance, intensity, target_tempo / 200.0, target_valence]
         last_artist_set = set(latest_track.get("artist_set", [])) if latest_track else set()
         blacklist_set = set(blacklist)
+        excluded = exclude_track_ids or set()
+        preference_similarity_default = 0.5
 
         best_track: Optional[Dict[str, object]] = None
         best_score = -1.0
         for track in self.tracks:
-            if track["id"] in blacklist_set:
+            if track["id"] in blacklist_set or track["id"] in excluded:
                 continue
             energy_alignment = 1 - abs(float(track["energy"]) - intensity)
             valence_similarity = 1 - min(1.0, abs(float(track["valence"]) - target_valence))
@@ -140,12 +150,18 @@ class RecommenderService:
             artist_set = track.get("artist_set", set())
             artist_similarity = self._artist_similarity(last_artist_set, artist_set)
             feature_similarity = _euclidean_similarity(track["feature_vector"], target_vector)
+            preference_similarity = (
+                _euclidean_similarity(track["feature_vector"], preference_vector)
+                if preference_vector
+                else preference_similarity_default
+            )
             combined_score = (
-                0.6 * energy_alignment
+                0.35 * energy_alignment
                 + 0.2 * artist_similarity
+                + 0.15 * preference_similarity
                 + 0.1 * valence_similarity
                 + 0.1 * dance_similarity
-                + 0.05 * feature_similarity
+                + 0.1 * feature_similarity
             )
             if combined_score > best_score:
                 best_score = combined_score

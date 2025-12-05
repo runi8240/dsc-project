@@ -21,10 +21,16 @@ except ModuleNotFoundError:
 
 # BLE constants
 HR_CHAR = "00002a37-0000-1000-8000-00805f9b34fb"
+# GARMIN_ID = os.getenv(
+#     "GARMIN_DEVICE_ID",
+#     "1A4EDA26-AA5E-0D73-27F1-211B33814D3C",
+# )
+
 GARMIN_ID = os.getenv(
     "GARMIN_DEVICE_ID",
-    "1A4EDA26-AA5E-0D73-27F1-211B33814D3C",
+    "F3FD4758-51E9-1BD3-36D9-80DF3F6C6B79",
 )
+
 
 # Backend endpoint
 BACKEND_TELEMETRY_URL = os.getenv("BACKEND_TELEMETRY_URL", "http://localhost:5001/telemetry")

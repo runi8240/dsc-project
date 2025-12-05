@@ -1,6 +1,7 @@
 import ast
 import csv
 import math
+import random
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Deque, Dict, List, Optional, Sequence, Tuple, Set
@@ -113,7 +114,7 @@ class RecommenderService:
         preference_vector: Optional[List[float]] = None,
         exclude_track_ids: Optional[Set[str]] = None,
     ) -> Optional[Dict[str, object]]:
-        """Pick the next track using a multi-factor score."""
+        """Pick the next track using liked-song preferences or energy-based randomness."""
         history = self.hr_history.get(user_id)
         if not history or not self.tracks:
             return None
@@ -130,44 +131,35 @@ class RecommenderService:
         elif trend < -TREND_THRESHOLD:
             intensity = clamp(intensity - 0.05, 0.0, 1.0)
 
-        target_valence = float(latest_track.get("valence", 0.5)) if latest_track else 0.5
-        target_dance = float(latest_track.get("danceability", 0.5)) if latest_track else 0.5
-        target_tempo = float(latest_track.get("tempo", 120.0)) if latest_track else 120.0
-        target_vector = [target_dance, intensity, target_tempo / 200.0, target_valence]
-        last_artist_set = set(latest_track.get("artist_set", [])) if latest_track else set()
+        _ = latest_track  # Selection now ignores the currently playing track.
         blacklist_set = set(blacklist)
         excluded = exclude_track_ids or set()
-        preference_similarity_default = 0.5
-
         best_track: Optional[Dict[str, object]] = None
-        best_score = -1.0
-        for track in self.tracks:
-            if track["id"] in blacklist_set or track["id"] in excluded:
-                continue
-            energy_alignment = 1 - abs(float(track["energy"]) - intensity)
-            valence_similarity = 1 - min(1.0, abs(float(track["valence"]) - target_valence))
-            dance_similarity = 1 - min(1.0, abs(float(track["danceability"]) - target_dance))
-            artist_set = track.get("artist_set", set())
-            artist_similarity = self._artist_similarity(last_artist_set, artist_set)
-            feature_similarity = _euclidean_similarity(track["feature_vector"], target_vector)
-            preference_similarity = (
-                _euclidean_similarity(track["feature_vector"], preference_vector)
-                if preference_vector
-                else preference_similarity_default
-            )
-            combined_score = (
-                0.35 * energy_alignment
-                + 0.2 * artist_similarity
-                + 0.15 * preference_similarity
-                + 0.1 * valence_similarity
-                + 0.1 * dance_similarity
-                + 0.1 * feature_similarity
-            )
-            if combined_score > best_score:
-                best_score = combined_score
-                best_track = track
 
-        if not best_track:
+        if preference_vector:
+            best_score = -1.0
+            for track in self.tracks:
+                if track["id"] in blacklist_set or track["id"] in excluded:
+                    continue
+                preference_similarity = _euclidean_similarity(track["feature_vector"], preference_vector)
+                if preference_similarity > best_score:
+                    best_score = preference_similarity
+                    best_track = track
+        else:
+            candidates: List[Tuple[Dict[str, object], float]] = []
+            for track in self.tracks:
+                if track["id"] in blacklist_set or track["id"] in excluded:
+                    continue
+                energy_alignment = clamp(1 - abs(float(track["energy"]) - intensity), 0.0, 1.0)
+                candidates.append((track, energy_alignment))
+            if not candidates:
+                return None
+            weights = [weight for _, weight in candidates]
+            if not any(weights):
+                weights = None
+            best_track = random.choices([track for track, _ in candidates], weights=weights, k=1)[0]
+
+        if best_track is None:
             return None
 
         return {
@@ -180,13 +172,3 @@ class RecommenderService:
             "valence": best_track.get("valence", ""),
             "artist_set": best_track.get("artist_set", set()),
         }
-
-    @staticmethod
-    def _artist_similarity(previous: set[str], current: set[str]) -> float:
-        if not previous or not current:
-            return 0.5
-        intersection = len(previous & current)
-        union = len(previous | current)
-        if union == 0:
-            return 0.0
-        return intersection / union

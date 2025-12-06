@@ -122,15 +122,41 @@
     }
     .current {
       display: flex;
-      align-items: baseline;
-      gap: 4px;
+      align-items: center;
+      gap: 6px;
       font-weight: 700;
       color: var(--accent);
-      font-size: 1.1rem;
+      font-size: 1.15rem;
+    }
+    .hr-stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .stat-tile {
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.04);
+      border-radius: 10px;
+      padding: 8px 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      color: var(--text);
+    }
+    .stat-label {
+      font-size: 0.8rem;
+      color: var(--muted);
+      letter-spacing: 0.2px;
+    }
+    .stat-value {
+      font-weight: 700;
+      font-size: 1rem;
+      color: var(--text);
     }
     canvas {
       width: 100% !important;
-      height: 150px !important;
+      height: 120px !important;
     }
     .spotify-control {
       display: flex;
@@ -200,6 +226,16 @@
           <div class="title">Live Heart Rate</div>
           <div class="current"><span id="hrValue">--</span><span style="color:var(--muted);font-size:0.9rem;">bpm</span></div>
         </div>
+        <div class="hr-stats">
+          <div class="stat-tile">
+            <div class="stat-label">Avg</div>
+            <div class="stat-value"><span id="hrAvg">--</span><span style="color:var(--muted);font-size:0.8rem;margin-left:4px;">bpm</span></div>
+          </div>
+          <div class="stat-tile">
+            <div class="stat-label">Max</div>
+            <div class="stat-value"><span id="hrMax">--</span><span style="color:var(--muted);font-size:0.8rem;margin-left:4px;">bpm</span></div>
+          </div>
+        </div>
         <canvas id="hrChart"></canvas>
       </div>
       <div class="card spotify-card">
@@ -238,6 +274,8 @@
   <script>
     const socket = io();
     const hrValue = document.getElementById("hrValue");
+    const hrAvg = document.getElementById("hrAvg");
+    const hrMax = document.getElementById("hrMax");
     const ctx = document.getElementById("hrChart").getContext("2d");
 
     const chart = new Chart(ctx, {
@@ -279,6 +317,15 @@
       if (chart.data.labels.length > 60) {
         chart.data.labels.shift();
         chart.data.datasets[0].data.shift();
+      }
+
+      const series = chart.data.datasets[0].data;
+      if (series.length) {
+        const total = series.reduce((acc, value) => acc + value, 0);
+        const avg = total / series.length;
+        const max = Math.max(...series);
+        hrAvg.textContent = Math.round(avg);
+        hrMax.textContent = max;
       }
 
       chart.update();

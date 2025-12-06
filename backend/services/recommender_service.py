@@ -154,10 +154,13 @@ class RecommenderService:
                 candidates.append((track, energy_alignment))
             if not candidates:
                 return None
-            weights = [weight for _, weight in candidates]
+            candidates.sort(key=lambda item: item[1], reverse=True)
+            top_candidates = candidates[: max(1, min(20, len(candidates)))]
+            weights = [max(weight, 0.0) ** 2 for _, weight in top_candidates]
             if not any(weights):
-                weights = None
-            best_track = random.choices([track for track, _ in candidates], weights=weights, k=1)[0]
+                best_track = top_candidates[0][0]
+            else:
+                best_track = random.choices([track for track, _ in top_candidates], weights=weights, k=1)[0]
 
         if best_track is None:
             return None

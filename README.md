@@ -1,4 +1,8 @@
-# DSC Project – Local Run Guide
+# TempoMind : A Garmin-Spotify Orchestrator – Local Run Guide
+
+## Team - 
+Manikandan Gunaseelan
+Rutuja Nikumb
 
 ## Prereqs
 - Python 3.11+
